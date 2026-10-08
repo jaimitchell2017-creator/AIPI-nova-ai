@@ -12,12 +12,11 @@
 // Only set to 10 if the device switches off by itself when unplugged/idle.
 #define POWER_LATCH_PIN -1
 
-// ---------- Display calibration (change these if the picture looks wrong) ----------
+// ---------- Display ----------
+// Driver type, offsets, inversion and colour order come from the presets in display.h.
+// At every boot the test pattern shows for 7 seconds: press the button during that time
+// to try the next preset. The one you leave on is remembered.
 #define LCD_WIDTH       128
 #define LCD_HEIGHT      128
-#define LCD_OFFSET_X    0      // try 2, 32 or 80 if the picture is shifted
-#define LCD_OFFSET_Y    0      // try 1, 3, 32 or 80 if the picture is shifted
-#define LCD_INVERT      true   // flip to false if colours look negative
-#define LCD_RGB_ORDER   false  // flip to true if red and blue are swapped
 #define LCD_ROTATION    0      // 0-3
 #define LCD_BRIGHTNESS  200    // 0-255
