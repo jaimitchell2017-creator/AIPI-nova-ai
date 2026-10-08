@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nova for AIPI Lite - Flasher</title>
+<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+<style>
+  body{font-family:system-ui,sans-serif;background:#0a0e1e;color:#ebf0ff;margin:0;padding:24px;line-height:1.5}
+  main{max-width:560px;margin:0 auto}
+  h1{color:#5ac8ff;margin-bottom:4px}
+  .card{background:#18203f;border-radius:16px;padding:18px;margin:16px 0}
+  li{margin:6px 0}
+  code{background:#0a0e1e;padding:2px 6px;border-radius:6px}
+  esp-web-install-button button{background:#5ac8ff;color:#0a0e1e;border:0;border-radius:999px;padding:12px 24px;font-size:16px;font-weight:700;cursor:pointer}
+</style>
+</head>
+<body>
+<main>
+  <h1>Nova</h1>
+  <p>Desk companion firmware for the XORIGIN AIPI Lite. Phase 1: clock and weather.</p>
+  <div class="card">
+    <esp-web-install-button manifest="manifest.json">
+      <button slot="activate">Install Nova</button>
+      <span slot="unsupported">Use Chrome or Edge on a computer or Chromebook.</span>
+      <span slot="not-allowed">This page must be opened over https.</span>
+    </esp-web-install-button>
+  </div>
+  <div class="card">
+    <ol>
+      <li>Plug the AIPI Lite into this computer with a USB-C data cable.</li>
+      <li>Click <b>Install Nova</b> and pick the serial port that appears.</li>
+      <li>If no port appears or flashing fails, put the device in bootloader mode (see the README) and try again.</li>
+      <li>After flashing, the screen shows a test pattern, then asks you to join the Wi-Fi called <code>Nova-Setup</code> on your phone to enter your Wi-Fi and city.</li>
+    </ol>
+    <p>Button: short press = next screen. Hold 4 seconds = reset Wi-Fi and city.</p>
+  </div>
+</main>
+</body>
+</html>
