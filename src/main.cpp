@@ -292,7 +292,7 @@ static void showLines(const char* l1, const char* l2 = nullptr, const char* l3 =
   canvas.pushSprite(0, 0);
 }
 
-static void testPattern() {
+static void testPattern(int preset) {
   canvas.fillScreen(TFT_BLACK);
   canvas.drawRect(0, 0, 128, 128, TFT_WHITE);
   canvas.fillRect(1, 1, 14, 14, TFT_RED);
@@ -302,9 +302,13 @@ static void testPattern() {
   canvas.setFont(&lgfx::fonts::Font4);
   canvas.setTextDatum(lgfx::textdatum::middle_center);
   canvas.setTextColor(TFT_WHITE);
-  canvas.drawString("NOVA", 64, 56);
+  canvas.drawString("NOVA", 64, 40);
   canvas.setFont(&lgfx::fonts::Font2);
-  canvas.drawString("AIPI Lite", 64, 80);
+  char pb[24];
+  snprintf(pb, sizeof(pb), "Preset %d of %d", preset + 1, LCD_PRESET_COUNT);
+  canvas.drawString(pb, 64, 66);
+  canvas.drawString("Press button", 64, 86);
+  canvas.drawString("if picture is bad", 64, 102);
   canvas.pushSprite(0, 0);
 }
 
@@ -519,6 +523,12 @@ void setup() {
   }
   pinMode(PIN_BUTTON, INPUT_PULLUP);
 
+  prefs.begin("novacal", true);
+  int preset = prefs.getInt("preset", 0);
+  prefs.end();
+  Serial.printf("Nova boot, display preset %d\n", preset);
+
+  lcd.applyPreset(preset);
   lcd.init();
   lcd.setRotation(LCD_ROTATION);
   lcd.setBrightness(LCD_BRIGHTNESS);
@@ -526,11 +536,28 @@ void setup() {
   canvas.createSprite(128, 128);
   initColors();
 
-  testPattern();
-  delay(2500);
+  testPattern(preset);
+
+  // Calibration window: press the button within 7 s to try the next display preset.
+  unsigned long w = millis();
+  while (digitalRead(PIN_BUTTON) == LOW && millis() - w < 3000) delay(10);
+  unsigned long t0 = millis();
+  while (millis() - t0 < 7000) {
+    if (digitalRead(PIN_BUTTON) == LOW) {
+      delay(40);
+      if (digitalRead(PIN_BUTTON) == LOW) {
+        prefs.begin("novacal", false);
+        prefs.putInt("preset", (preset + 1) % LCD_PRESET_COUNT);
+        prefs.end();
+        ESP.restart();
+      }
+    }
+    delay(10);
+  }
 
   loadSettings();
   connectWifi();
+  Serial.printf("Wi-Fi connected, IP %s\n", WiFi.localIP().toString().c_str());
   configTime(gOffset, 0, "pool.ntp.org", "time.google.com");
   showLines("Nova", "Getting weather...");
   if (!refreshWeather()) nextWeather = millis() + 30000;
