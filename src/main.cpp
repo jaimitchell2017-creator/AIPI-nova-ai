@@ -312,6 +312,49 @@ static void testPattern(int preset) {
   canvas.pushSprite(0, 0);
 }
 
+static void gridPattern() {
+  // Drawn straight onto the screen (no big sprite), so it cannot run out of memory.
+  uint16_t dim = lcd.color565(40, 40, 40), mid = lcd.color565(120, 120, 120);
+  lcd.fillScreen(TFT_BLACK);
+  for (int x = 0; x < 240; x += 20) lcd.drawFastVLine(x, 0, 320, (x % 40 == 0) ? mid : dim);
+  for (int y = 0; y < 320; y += 20) lcd.drawFastHLine(0, y, 240, (y % 40 == 0) ? mid : dim);
+  lcd.setFont(&lgfx::fonts::Font0);
+  lcd.setTextSize(1);
+  lcd.setTextDatum(lgfx::textdatum::top_left);
+  lcd.setTextColor(TFT_WHITE);
+  char b[12];
+  for (int y = 0; y < 320; y += 40) {
+    for (int x = 0; x < 240; x += 40) {
+      snprintf(b, sizeof(b), "%d,%d", x, y);
+      lcd.drawString(b, x + 2, y + 2);
+    }
+  }
+  lcd.fillRect(0, 0, 8, 8, TFT_RED);
+  lcd.fillRect(232, 0, 8, 8, TFT_GREEN);
+  lcd.fillRect(0, 312, 8, 8, TFT_BLUE);
+  lcd.fillRect(232, 312, 8, 8, TFT_YELLOW);
+}
+
+// Waits for a button press and, if one comes, moves to the next display preset and restarts.
+// timeoutMs = 0 means wait forever.
+static void presetWindow(int preset, unsigned long timeoutMs) {
+  unsigned long w = millis();
+  while (digitalRead(PIN_BUTTON) == LOW && millis() - w < 3000) delay(10);
+  unsigned long t0 = millis();
+  while (timeoutMs == 0 || millis() - t0 < timeoutMs) {
+    if (digitalRead(PIN_BUTTON) == LOW) {
+      delay(40);
+      if (digitalRead(PIN_BUTTON) == LOW) {
+        prefs.begin("novacal", false);
+        prefs.putInt("preset2", (preset + 1) % LCD_PRESET_COUNT);
+        prefs.end();
+        ESP.restart();
+      }
+    }
+    delay(10);
+  }
+}
+
 static int shownTemp(float t) { return (int)lroundf(t); }
 
 static void drawClock() {
@@ -524,35 +567,37 @@ void setup() {
   pinMode(PIN_BUTTON, INPUT_PULLUP);
 
   prefs.begin("novacal", true);
-  int preset = prefs.getInt("preset", 0);
+  bool calibrated = prefs.isKey("preset2");
+  int preset = prefs.getInt("preset2", 0);
   prefs.end();
-  Serial.printf("Nova boot, display preset %d\n", preset);
+  bool raw = lcdPresetIsRaw(preset);
+  Serial.printf("Nova boot, display preset %d%s%s\n", preset, raw ? " (grid view)" : "", calibrated ? " (saved)" : "");
 
   lcd.applyPreset(preset);
   lcd.init();
-  lcd.setRotation(LCD_ROTATION);
+  // During calibration always use rotation 0 so offsets are easy to judge.
+  lcd.setRotation((calibrated && !raw) ? LCD_ROTATION : 0);
   lcd.setBrightness(LCD_BRIGHTNESS);
   canvas.setColorDepth(16);
-  canvas.createSprite(128, 128);
+  if (!canvas.createSprite(128, 128)) Serial.println("WARNING: could not allocate the 128x128 sprite");
   initColors();
 
-  testPattern(preset);
-
-  // Calibration window: press the button within 7 s to try the next display preset.
-  unsigned long w = millis();
-  while (digitalRead(PIN_BUTTON) == LOW && millis() - w < 3000) delay(10);
-  unsigned long t0 = millis();
-  while (millis() - t0 < 7000) {
-    if (digitalRead(PIN_BUTTON) == LOW) {
-      delay(40);
-      if (digitalRead(PIN_BUTTON) == LOW) {
-        prefs.begin("novacal", false);
-        prefs.putInt("preset", (preset + 1) % LCD_PRESET_COUNT);
-        prefs.end();
-        ESP.restart();
-      }
+  if (raw) {
+    gridPattern();
+    presetWindow(preset, 0);  // stays on the grid until the button is pressed
+  } else if (!calibrated) {
+    testPattern(preset);
+    presetWindow(preset, 7000);  // press the button within 7 s to try the next preset
+  } else if (digitalRead(PIN_BUTTON) == LOW) {
+    // Hold the button while powering on (1.5 s) to redo the display calibration.
+    unsigned long th = millis();
+    while (digitalRead(PIN_BUTTON) == LOW && millis() - th < 1500) delay(10);
+    if (millis() - th >= 1500) {
+      prefs.begin("novacal", false);
+      prefs.remove("preset2");
+      prefs.end();
+      ESP.restart();
     }
-    delay(10);
   }
 
   loadSettings();
