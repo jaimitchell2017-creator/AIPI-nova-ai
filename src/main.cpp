@@ -9,8 +9,128 @@
 #include <Preferences.h>
 #include <time.h>
 #include <LittleFS.h>
-#include "config.h"
-#include "display.h"
+
+// ===================== pins and settings (all in this one file) =====================
+#define PIN_LCD_BL    3
+#define PIN_LCD_DC    7
+#define PIN_LCD_CS    15
+#define PIN_LCD_SCLK  16
+#define PIN_LCD_MOSI  17
+#define PIN_LCD_RST   18
+#define PIN_BUTTON    42   // the right-hand button (the left one is not wired to a pin)
+#define PIN_LED       46   // the on-board RGB LED
+#define POWER_LATCH_PIN -1
+#define LCD_WIDTH       128
+#define LCD_HEIGHT      128
+#define LCD_ROTATION    1      // default rotation 0-3 (the known-good ESPHome setup uses 90 degrees)
+#define LCD_BRIGHTNESS  200    // 0-255
+#define NOVA_BUILD "phase1-single-file-v3"
+
+// ===================== display presets =====================
+#define LGFX_USE_V1
+#include <LovyanGFX.hpp>
+
+// Known-good setup for this board (from the open-source ESPHome template): ST7735 driver,
+// colours inverted, 128x128, rotated 90 degrees.
+struct LcdPreset {
+  bool st7789;  // true = ST7789 driver, false = ST7735S driver
+  bool raw;     // true = show the controller's whole memory (grid view)
+  int offX, offY;
+  bool invert;
+  bool bgr;
+};
+
+static const LcdPreset LCD_PRESETS[] = {
+    {false, true, 0, 0, true, true},   // 0: grid view
+    {false, false, 2, 3, true, true},  // 1: default (ESPHome-style: inverted)
+    {false, false, 2, 3, true, false}, // 2
+    {false, false, 2, 1, true, true},  // 3
+    {false, false, 2, 1, true, false}, // 4
+    {false, false, 0, 0, true, true},  // 5
+    {false, false, 2, 3, false, true}, // 6: the setting from the first working video
+    {true, false, 0, 0, true, true},   // 7: ST7789
+};
+static const int LCD_PRESET_COUNT = sizeof(LCD_PRESETS) / sizeof(LCD_PRESETS[0]);
+#define LCD_DEFAULT_PRESET 1
+
+static inline int lcdPresetIndex(int idx) { return ((idx % LCD_PRESET_COUNT) + LCD_PRESET_COUNT) % LCD_PRESET_COUNT; }
+static inline bool lcdPresetIsRaw(int idx) { return LCD_PRESETS[lcdPresetIndex(idx)].raw; }
+
+class LGFX : public lgfx::LGFX_Device {
+  lgfx::Panel_ST7789 _p7789;
+  lgfx::Panel_ST7735S _p7735;
+  lgfx::Bus_SPI _bus;
+  lgfx::Light_PWM _light;
+
+  template <class PANEL>
+  void setupPanel(PANEL& pn, const LcdPreset& p, bool setMemory) {
+    auto cfg = pn.config();
+    cfg.pin_cs = PIN_LCD_CS;
+    cfg.pin_rst = PIN_LCD_RST;
+    cfg.pin_busy = -1;
+    if (setMemory) {  // ST7789 has 240x320 memory; the ST7735S keeps its own defaults
+      cfg.memory_width = 240;
+      cfg.memory_height = 320;
+    }
+    cfg.panel_width = p.raw ? cfg.memory_width : LCD_WIDTH;
+    cfg.panel_height = p.raw ? cfg.memory_height : LCD_HEIGHT;
+    cfg.offset_x = p.raw ? 0 : p.offX;
+    cfg.offset_y = p.raw ? 0 : p.offY;
+    cfg.offset_rotation = 0;
+    cfg.readable = false;
+    cfg.invert = p.invert;
+    cfg.rgb_order = p.bgr;
+    cfg.dlen_16bit = false;
+    cfg.bus_shared = false;
+    pn.config(cfg);
+  }
+
+ public:
+  LGFX() {
+    {
+      auto cfg = _bus.config();
+      cfg.spi_host = SPI2_HOST;
+      cfg.spi_mode = 0;
+      cfg.freq_write = 20000000;
+      cfg.freq_read = 0;
+      cfg.spi_3wire = true;
+      cfg.use_lock = true;
+      cfg.dma_channel = SPI_DMA_CH_AUTO;
+      cfg.pin_sclk = PIN_LCD_SCLK;
+      cfg.pin_mosi = PIN_LCD_MOSI;
+      cfg.pin_miso = -1;
+      cfg.pin_dc = PIN_LCD_DC;
+      _bus.config(cfg);
+      _p7789.setBus(&_bus);
+      _p7735.setBus(&_bus);
+    }
+    {
+      auto cfg = _light.config();
+      cfg.pin_bl = PIN_LCD_BL;
+      cfg.invert = false;
+      cfg.freq = 44100;
+      cfg.pwm_channel = 7;
+      _light.config(cfg);
+      _p7789.setLight(&_light);
+      _p7735.setLight(&_light);
+    }
+    applyPreset(LCD_DEFAULT_PRESET);
+  }
+
+  // Call before init().
+  void applyPreset(int idx) {
+    const LcdPreset& p = LCD_PRESETS[lcdPresetIndex(idx)];
+    if (p.st7789) {
+      setupPanel(_p7789, p, true);
+      setPanel(&_p7789);
+    } else {
+      setupPanel(_p7735, p, false);
+      setPanel(&_p7735);
+    }
+  }
+};
+
+static void led(uint8_t r, uint8_t g, uint8_t b) { neopixelWrite(PIN_LED, r, g, b); }
 
 static LGFX lcd;
 static LGFX_Sprite canvas(&lcd);
@@ -387,6 +507,7 @@ static void printStatus() {
   struct tm t;
   char ts[32] = "not synced yet";
   if (getLocalTime(&t, 0)) strftime(ts, sizeof(ts), "%a %d %b %Y %H:%M:%S", &t);
+  Serial.printf("Build %s (%s %s)\n", NOVA_BUILD, __DATE__, __TIME__);
   Serial.printf("Display preset %d, rotation %d, brightness %d\n", g_preset, g_rot, g_bright);
   if (WiFi.status() == WL_CONNECTED) Serial.printf("Wi-Fi: %s, IP %s\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
   else Serial.println("Wi-Fi: not connected");
@@ -789,6 +910,8 @@ static void handleButton() {
 // ---------- main ----------
 void setup() {
   Serial.begin(115200);
+  led(0, 0, 40);  // blue = firmware started
+  Serial.printf("Nova build %s (%s %s)\n", NOVA_BUILD, __DATE__, __TIME__);
   if (POWER_LATCH_PIN >= 0) {
     pinMode(POWER_LATCH_PIN, OUTPUT);
     digitalWrite(POWER_LATCH_PIN, HIGH);
@@ -812,6 +935,7 @@ void setup() {
 
   lcd.applyPreset(preset);
   lcd.init();
+  led(40, 30, 0);  // yellow = screen initialised
   // During calibration always use rotation 0 so offsets are easy to judge.
   lcd.setRotation((calibrated && !raw) ? rot : 0);
   lcd.setBrightness(bright);
@@ -838,6 +962,7 @@ void setup() {
   if (!refreshWeather()) nextWeather = millis() + 30000;
   else nextWeather = millis() + 15UL * 60UL * 1000UL;
   lastInteraction = millis();
+  led(0, 25, 0);  // green = finished starting up
 }
 
 void loop() {
