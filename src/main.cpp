@@ -8,6 +8,7 @@
 #include <ArduinoJson.h>
 #include <Preferences.h>
 #include <time.h>
+#include <LittleFS.h>
 #include "config.h"
 #include "display.h"
 
@@ -57,6 +58,9 @@ static int screenIdx = 0;  // 0 clock, 1 weather, 2 week
 static bool dirty = true;
 static unsigned long lastInteraction = 0, lastDraw = 0, nextWeather = 0;
 static bool shouldSave = false;
+static bool fsOk = false;
+static int g_preset = 0, g_rot = 0, g_bright = 200;
+static void resetWifi();
 
 static void loadSettings() {
   prefs.begin("nova", true);
@@ -305,7 +309,7 @@ static void testPattern(int preset) {
   canvas.drawString("NOVA", 64, 40);
   canvas.setFont(&lgfx::fonts::Font2);
   char pb[24];
-  snprintf(pb, sizeof(pb), "Preset %d of %d", preset + 1, LCD_PRESET_COUNT);
+  snprintf(pb, sizeof(pb), "Preset %d (0-%d)", preset, LCD_PRESET_COUNT - 1);
   canvas.drawString(pb, 64, 66);
   canvas.drawString("Press button", 64, 86);
   canvas.drawString("if picture is bad", 64, 102);
@@ -335,19 +339,246 @@ static void gridPattern() {
   lcd.fillRect(232, 312, 8, 8, TFT_YELLOW);
 }
 
-// Waits for a button press and, if one comes, moves to the next display preset and restarts.
-// timeoutMs = 0 means wait forever.
+// ---------- serial commands (type them in the Logs & Console box, then press Enter) ----------
+//   preset N   -> use display preset N (the number the log prints, 0-7) and restart
+//   rot N      -> screen rotation 0-3 and restart
+//   reset      -> forget display settings and restart
+static String serialBuf;
+
+static void notesAdd(const String& text) {
+  if (!fsOk) {
+    Serial.println("Storage is not ready.");
+    return;
+  }
+  File f = LittleFS.open("/notes.txt", FILE_APPEND);
+  if (!f) {
+    Serial.println("Could not open the notes file.");
+    return;
+  }
+  struct tm t;
+  char ts[24] = "no-time";
+  if (getLocalTime(&t, 0)) strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M", &t);
+  f.printf("%s | %s\n", ts, text.c_str());
+  f.close();
+  Serial.println("Note saved on the device.");
+}
+
+static void notesList() {
+  if (!fsOk) {
+    Serial.println("Storage is not ready.");
+    return;
+  }
+  File f = LittleFS.open("/notes.txt", FILE_READ);
+  if (!f) {
+    Serial.println("No notes yet.");
+    return;
+  }
+  int n = 0;
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.length()) Serial.printf("%d: %s\n", ++n, line.c_str());
+  }
+  f.close();
+  if (!n) Serial.println("No notes yet.");
+}
+
+static void printStatus() {
+  struct tm t;
+  char ts[32] = "not synced yet";
+  if (getLocalTime(&t, 0)) strftime(ts, sizeof(ts), "%a %d %b %Y %H:%M:%S", &t);
+  Serial.printf("Display preset %d, rotation %d, brightness %d\n", g_preset, g_rot, g_bright);
+  if (WiFi.status() == WL_CONNECTED) Serial.printf("Wi-Fi: %s, IP %s\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
+  else Serial.println("Wi-Fi: not connected");
+  Serial.printf("City: %s, %s clock, %s\n", cfg.city.c_str(), cfg.use24h ? "24-hour" : "12-hour", cfg.fahrenheit ? "Fahrenheit" : "Celsius");
+  Serial.printf("Time: %s\n", ts);
+  Serial.printf("Weather loaded: %s\n", wx.valid ? "yes" : "no");
+  if (fsOk) Serial.printf("Storage: %u of %u bytes used\n", (unsigned)LittleFS.usedBytes(), (unsigned)LittleFS.totalBytes());
+  Serial.printf("Free memory: %u bytes, uptime %lu s\n", (unsigned)ESP.getFreeHeap(), millis() / 1000);
+}
+
+static void printHelp() {
+  Serial.println("Commands:");
+  Serial.println("  help                 show this list");
+  Serial.println("  status               settings, Wi-Fi, time, memory, storage");
+  Serial.println("  time                 show the current time");
+  Serial.println("  city NAME            set the weather city (e.g. city Sydney)");
+  Serial.println("  units c | f          Celsius or Fahrenheit");
+  Serial.println("  clock 12 | 24        12-hour or 24-hour clock");
+  Serial.println("  weather              refresh the weather now");
+  Serial.println("  screen 0-2           show clock, weather or 7-day screen");
+  Serial.println("  brightness 0-255     screen brightness (saved)");
+  Serial.println("  note TEXT            save a note on the device (works offline)");
+  Serial.println("  notes                list saved notes");
+  Serial.println("  clearnotes           delete all notes");
+  Serial.println("  preset 0-7           display preset (saved, restarts)");
+  Serial.println("  rot 0-3              screen rotation (saved, restarts)");
+  Serial.println("  wifi reset           forget Wi-Fi and city setup (restarts)");
+  Serial.println("  reset                clear display settings (restarts)");
+  Serial.println("  reboot               restart the device");
+}
+
+static void runCommand(String orig) {
+  orig.trim();
+  String l = orig;
+  l.toLowerCase();
+  int sp = l.indexOf(' ');
+  String cmd = sp < 0 ? l : l.substring(0, sp);
+  String arg = sp < 0 ? "" : l.substring(sp + 1);
+  String argOrig = sp < 0 ? "" : orig.substring(sp + 1);
+  arg.trim();
+  argOrig.trim();
+
+  if (cmd == "help" || cmd == "?") {
+    printHelp();
+  } else if (cmd == "status") {
+    printStatus();
+  } else if (cmd == "time") {
+    struct tm t;
+    if (getLocalTime(&t, 0)) {
+      char ts[40];
+      strftime(ts, sizeof(ts), "%A %d %B %Y, %H:%M:%S", &t);
+      Serial.println(ts);
+    } else {
+      Serial.println("Time not synced yet (needs Wi-Fi).");
+    }
+  } else if (cmd == "city") {
+    if (!argOrig.length()) {
+      Serial.printf("City is %s. Use: city Sydney\n", cfg.city.c_str());
+    } else {
+      cfg.city = argOrig;
+      saveSettings();
+      haveLoc = false;
+      nextWeather = 0;
+      Serial.printf("City set to %s. Refreshing weather...\n", cfg.city.c_str());
+    }
+  } else if (cmd == "units") {
+    if (arg == "c" || arg == "f") {
+      cfg.fahrenheit = (arg == "f");
+      saveSettings();
+      nextWeather = 0;
+      Serial.printf("Units: %s\n", cfg.fahrenheit ? "Fahrenheit" : "Celsius");
+    } else {
+      Serial.println("Use: units c   or   units f");
+    }
+  } else if (cmd == "clock") {
+    if (arg == "12" || arg == "24") {
+      cfg.use24h = (arg == "24");
+      saveSettings();
+      dirty = true;
+      Serial.printf("Clock: %s-hour\n", arg.c_str());
+    } else {
+      Serial.println("Use: clock 12   or   clock 24");
+    }
+  } else if (cmd == "weather") {
+    nextWeather = 0;
+    Serial.println("Refreshing weather...");
+  } else if (cmd == "screen") {
+    int n = arg.toInt();
+    if (n < 0 || n > 2) {
+      Serial.println("Use: screen 0, 1 or 2");
+    } else {
+      screenIdx = n;
+      lastInteraction = millis();
+      dirty = true;
+      Serial.printf("Showing screen %d\n", n);
+    }
+  } else if (cmd == "brightness") {
+    int n = arg.toInt();
+    if (!arg.length() || n < 0 || n > 255) {
+      Serial.printf("Brightness is %d. Use: brightness 0-255\n", g_bright);
+    } else {
+      g_bright = n;
+      lcd.setBrightness(n);
+      prefs.begin("novacal", false);
+      prefs.putInt("bright", n);
+      prefs.end();
+      Serial.printf("Brightness %d saved.\n", n);
+    }
+  } else if (cmd == "note") {
+    if (!argOrig.length()) Serial.println("Use: note buy milk");
+    else notesAdd(argOrig);
+  } else if (cmd == "notes") {
+    notesList();
+  } else if (cmd == "clearnotes") {
+    if (fsOk) LittleFS.remove("/notes.txt");
+    Serial.println("Notes deleted.");
+  } else if (cmd == "preset") {
+    int n = arg.toInt();
+    if (!arg.length() || n < 0 || n >= LCD_PRESET_COUNT) {
+      Serial.printf("Use: preset 0 to preset %d\n", LCD_PRESET_COUNT - 1);
+      return;
+    }
+    prefs.begin("novacal", false);
+    prefs.putInt("preset2", n);
+    prefs.end();
+    Serial.printf("Saved display preset %d. Restarting...\n", n);
+    delay(300);
+    ESP.restart();
+  } else if (cmd == "rot") {
+    int n = arg.toInt();
+    if (!arg.length() || n < 0 || n > 3) {
+      Serial.println("Use: rot 0 to rot 3");
+      return;
+    }
+    prefs.begin("novacal", false);
+    prefs.putInt("rot2", n);
+    prefs.end();
+    Serial.printf("Saved rotation %d. Restarting...\n", n);
+    delay(300);
+    ESP.restart();
+  } else if (cmd == "wifi" && arg == "reset") {
+    Serial.println("Forgetting Wi-Fi settings...");
+    resetWifi();
+  } else if (cmd == "reset") {
+    prefs.begin("novacal", false);
+    prefs.clear();
+    prefs.end();
+    Serial.println("Display settings cleared. Restarting...");
+    delay(300);
+    ESP.restart();
+  } else if (cmd == "reboot" || cmd == "restart") {
+    Serial.println("Restarting...");
+    delay(300);
+    ESP.restart();
+  } else {
+    Serial.printf("Unknown command: %s   (type help)\n", cmd.c_str());
+  }
+}
+
+static void handleSerial() {
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == '\n' || c == '\r') {
+      String l = serialBuf;
+      serialBuf = "";
+      l.trim();
+      if (l.length()) runCommand(l);
+    } else if (serialBuf.length() < 64) {
+      serialBuf += c;
+    }
+  }
+}
+
+// Waits for a button press (either button) and, if one comes, moves to the next display preset and restarts.
+// timeoutMs = 0 means wait forever. Typed serial commands are also handled here.
 static void presetWindow(int preset, unsigned long timeoutMs) {
   unsigned long w = millis();
   while (digitalRead(PIN_BUTTON) == LOW && millis() - w < 3000) delay(10);
+  bool backArmed = digitalRead(PIN_BUTTON_BACK) == HIGH;  // only trust it once seen released
   unsigned long t0 = millis();
   while (timeoutMs == 0 || millis() - t0 < timeoutMs) {
-    if (digitalRead(PIN_BUTTON) == LOW) {
+    handleSerial();
+    if (!backArmed && digitalRead(PIN_BUTTON_BACK) == HIGH) backArmed = true;
+    bool pressed = digitalRead(PIN_BUTTON) == LOW || (backArmed && digitalRead(PIN_BUTTON_BACK) == LOW);
+    if (pressed) {
       delay(40);
-      if (digitalRead(PIN_BUTTON) == LOW) {
+      pressed = digitalRead(PIN_BUTTON) == LOW || (backArmed && digitalRead(PIN_BUTTON_BACK) == LOW);
+      if (pressed) {
         prefs.begin("novacal", false);
         prefs.putInt("preset2", (preset + 1) % LCD_PRESET_COUNT);
         prefs.end();
+        Serial.printf("Button pressed: trying display preset %d\n", (preset + 1) % LCD_PRESET_COUNT);
         ESP.restart();
       }
     }
@@ -569,15 +800,24 @@ void setup() {
   prefs.begin("novacal", true);
   bool calibrated = prefs.isKey("preset2");
   int preset = prefs.getInt("preset2", 0);
+  int rot = prefs.getInt("rot2", LCD_ROTATION);
+  int bright = prefs.getInt("bright", LCD_BRIGHTNESS);
   prefs.end();
+  g_preset = preset;
+  g_rot = rot;
+  g_bright = bright;
+  fsOk = LittleFS.begin(true);
+  if (!fsOk) Serial.println("WARNING: storage could not start");
+  pinMode(PIN_BUTTON_BACK, INPUT_PULLUP);
   bool raw = lcdPresetIsRaw(preset);
-  Serial.printf("Nova boot, display preset %d%s%s\n", preset, raw ? " (grid view)" : "", calibrated ? " (saved)" : "");
+  Serial.printf("Nova boot, display preset %d%s%s, rotation %d\n", preset, raw ? " (grid view)" : "", calibrated ? " (saved)" : "", rot);
+  Serial.println("Type help in the console to see all commands.");
 
   lcd.applyPreset(preset);
   lcd.init();
   // During calibration always use rotation 0 so offsets are easy to judge.
-  lcd.setRotation((calibrated && !raw) ? LCD_ROTATION : 0);
-  lcd.setBrightness(LCD_BRIGHTNESS);
+  lcd.setRotation((calibrated && !raw) ? rot : 0);
+  lcd.setBrightness(bright);
   canvas.setColorDepth(16);
   if (!canvas.createSprite(128, 128)) Serial.println("WARNING: could not allocate the 128x128 sprite");
   initColors();
@@ -588,16 +828,9 @@ void setup() {
   } else if (!calibrated) {
     testPattern(preset);
     presetWindow(preset, 7000);  // press the button within 7 s to try the next preset
-  } else if (digitalRead(PIN_BUTTON) == LOW) {
-    // Hold the button while powering on (1.5 s) to redo the display calibration.
-    unsigned long th = millis();
-    while (digitalRead(PIN_BUTTON) == LOW && millis() - th < 1500) delay(10);
-    if (millis() - th >= 1500) {
-      prefs.begin("novacal", false);
-      prefs.remove("preset2");
-      prefs.end();
-      ESP.restart();
-    }
+  } else {
+    // Saved setting: a 3 s window at power-up. Press either button to try the next preset.
+    presetWindow(preset, 3000);
   }
 
   loadSettings();
@@ -611,6 +844,7 @@ void setup() {
 }
 
 void loop() {
+  handleSerial();
   handleButton();
   unsigned long now = millis();
 
