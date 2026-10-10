@@ -798,8 +798,8 @@ void setup() {
   pinMode(PIN_BUTTON, INPUT_PULLUP);
 
   prefs.begin("novacal", true);
-  bool calibrated = prefs.isKey("preset2");
-  int preset = prefs.getInt("preset2", 0);
+  bool calibrated = true;  // a default preset (LCD_DEFAULT_PRESET) is used until you change it
+  int preset = prefs.getInt("preset2", LCD_DEFAULT_PRESET);
   int rot = prefs.getInt("rot2", LCD_ROTATION);
   int bright = prefs.getInt("bright", LCD_BRIGHTNESS);
   prefs.end();
