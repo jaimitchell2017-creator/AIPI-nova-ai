@@ -3,51 +3,35 @@
 #include <LovyanGFX.hpp>
 #include "config.h"
 
-// Display presets. The AIPI Lite's screen controller is reported differently by different
-// community projects (ST7789 vs ST7735), so Nova can cycle through likely settings at boot.
+// Display presets for the AIPI Lite's 128x128 ST7789 screen (BGR colour order, inverted).
+// Preset 0 is a "grid" view that shows the whole controller memory with coordinates, so we can
+// read off where the 128x128 window really sits. Presets 1+ try likely window offsets.
 struct LcdPreset {
-  bool st7789;  // true = ST7789 driver, false = ST7735S driver
+  bool raw;  // true = show the whole 240x320 controller memory (grid view)
   int offX, offY;
   bool invert;
   bool bgr;
 };
 
 static const LcdPreset LCD_PRESETS[] = {
-    {true, 0, 0, true, false},   // 0
-    {true, 0, 0, true, true},    // 1
-    {true, 0, 0, false, false},  // 2
-    {true, 0, 0, false, true},   // 3
-    {false, 2, 1, false, false}, // 4
-    {false, 2, 1, false, true},  // 5
-    {false, 2, 1, true, false},  // 6
-    {false, 2, 3, false, true},  // 7
+    {true, 0, 0, true, true},    // 0: grid view
+    {false, 0, 0, true, true},   // 1
+    {false, 2, 1, true, true},   // 2
+    {false, 0, 32, true, true},  // 3
+    {false, 32, 0, true, true},  // 4
+    {false, 0, 80, true, true},  // 5
+    {false, 80, 0, true, true},  // 6
+    {false, 2, 3, true, true},   // 7
 };
 static const int LCD_PRESET_COUNT = sizeof(LCD_PRESETS) / sizeof(LCD_PRESETS[0]);
 
+static inline int lcdPresetIndex(int idx) { return ((idx % LCD_PRESET_COUNT) + LCD_PRESET_COUNT) % LCD_PRESET_COUNT; }
+static inline bool lcdPresetIsRaw(int idx) { return LCD_PRESETS[lcdPresetIndex(idx)].raw; }
+
 class LGFX : public lgfx::LGFX_Device {
-  lgfx::Panel_ST7789 _p7789;
-  lgfx::Panel_ST7735S _p7735;
+  lgfx::Panel_ST7789 _panel;
   lgfx::Bus_SPI _bus;
   lgfx::Light_PWM _light;
-
-  template <class PANEL>
-  void setupPanel(PANEL& pn, const LcdPreset& p) {
-    auto cfg = pn.config();
-    cfg.pin_cs = PIN_LCD_CS;
-    cfg.pin_rst = PIN_LCD_RST;
-    cfg.pin_busy = -1;
-    cfg.panel_width = LCD_WIDTH;
-    cfg.panel_height = LCD_HEIGHT;
-    cfg.offset_x = p.offX;
-    cfg.offset_y = p.offY;
-    cfg.offset_rotation = 0;
-    cfg.readable = false;
-    cfg.invert = p.invert;
-    cfg.rgb_order = p.bgr;
-    cfg.dlen_16bit = false;
-    cfg.bus_shared = false;
-    pn.config(cfg);
-  }
 
  public:
   LGFX() {
@@ -65,8 +49,7 @@ class LGFX : public lgfx::LGFX_Device {
       cfg.pin_miso = -1;
       cfg.pin_dc = PIN_LCD_DC;
       _bus.config(cfg);
-      _p7789.setBus(&_bus);
-      _p7735.setBus(&_bus);
+      _panel.setBus(&_bus);
     }
     {
       auto cfg = _light.config();
@@ -75,21 +58,31 @@ class LGFX : public lgfx::LGFX_Device {
       cfg.freq = 44100;
       cfg.pwm_channel = 7;
       _light.config(cfg);
-      _p7789.setLight(&_light);
-      _p7735.setLight(&_light);
+      _panel.setLight(&_light);
     }
+    setPanel(&_panel);
     applyPreset(0);
   }
 
   // Call before init().
   void applyPreset(int idx) {
-    const LcdPreset& p = LCD_PRESETS[((idx % LCD_PRESET_COUNT) + LCD_PRESET_COUNT) % LCD_PRESET_COUNT];
-    if (p.st7789) {
-      setupPanel(_p7789, p);
-      setPanel(&_p7789);
-    } else {
-      setupPanel(_p7735, p);
-      setPanel(&_p7735);
-    }
+    const LcdPreset& p = LCD_PRESETS[lcdPresetIndex(idx)];
+    auto cfg = _panel.config();
+    cfg.pin_cs = PIN_LCD_CS;
+    cfg.pin_rst = PIN_LCD_RST;
+    cfg.pin_busy = -1;
+    cfg.memory_width = 240;
+    cfg.memory_height = 320;
+    cfg.panel_width = p.raw ? 240 : LCD_WIDTH;
+    cfg.panel_height = p.raw ? 320 : LCD_HEIGHT;
+    cfg.offset_x = p.raw ? 0 : p.offX;
+    cfg.offset_y = p.raw ? 0 : p.offY;
+    cfg.offset_rotation = 0;
+    cfg.readable = false;
+    cfg.invert = p.invert;
+    cfg.rgb_order = p.bgr;
+    cfg.dlen_16bit = false;
+    cfg.bus_shared = false;
+    _panel.config(cfg);
   }
 };
