@@ -560,25 +560,23 @@ static void handleSerial() {
   }
 }
 
-// Waits for a button press (either button) and, if one comes, moves to the next display preset and restarts.
+// Waits for a press of the main button and, if one comes, moves to the next display preset and restarts.
 // timeoutMs = 0 means wait forever. Typed serial commands are also handled here.
 static void presetWindow(int preset, unsigned long timeoutMs) {
   unsigned long w = millis();
   while (digitalRead(PIN_BUTTON) == LOW && millis() - w < 3000) delay(10);
-  bool backArmed = digitalRead(PIN_BUTTON_BACK) == HIGH;  // only trust it once seen released
   unsigned long t0 = millis();
   while (timeoutMs == 0 || millis() - t0 < timeoutMs) {
     handleSerial();
-    if (!backArmed && digitalRead(PIN_BUTTON_BACK) == HIGH) backArmed = true;
-    bool pressed = digitalRead(PIN_BUTTON) == LOW || (backArmed && digitalRead(PIN_BUTTON_BACK) == LOW);
-    if (pressed) {
+    if (digitalRead(PIN_BUTTON) == LOW) {
       delay(40);
-      pressed = digitalRead(PIN_BUTTON) == LOW || (backArmed && digitalRead(PIN_BUTTON_BACK) == LOW);
-      if (pressed) {
+      if (digitalRead(PIN_BUTTON) == LOW) {
+        int next = (preset + 1) % LCD_PRESET_COUNT;
         prefs.begin("novacal", false);
-        prefs.putInt("preset2", (preset + 1) % LCD_PRESET_COUNT);
+        prefs.putInt("preset2", next);
         prefs.end();
-        Serial.printf("Button pressed: trying display preset %d\n", (preset + 1) % LCD_PRESET_COUNT);
+        Serial.printf("Button pressed: trying display preset %d\n", next);
+        delay(300);
         ESP.restart();
       }
     }
@@ -808,7 +806,6 @@ void setup() {
   g_bright = bright;
   fsOk = LittleFS.begin(true);
   if (!fsOk) Serial.println("WARNING: storage could not start");
-  pinMode(PIN_BUTTON_BACK, INPUT_PULLUP);
   bool raw = lcdPresetIsRaw(preset);
   Serial.printf("Nova boot, display preset %d%s%s, rotation %d\n", preset, raw ? " (grid view)" : "", calibrated ? " (saved)" : "", rot);
   Serial.println("Type help in the console to see all commands.");
